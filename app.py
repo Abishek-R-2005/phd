@@ -53,24 +53,26 @@ WORKFLOW_ID = "detect-count-and-visualize-2"
 
 
 # ---------------------------------------------------
-# SEGMENTATION AREA PROCESSING
+# SEGMENTATION PROCESSING
 # ---------------------------------------------------
 def process_frame(image, predictions):
 
     h, w, _ = image.shape
 
-    bbox_image = image.copy()
     seg_overlay = image.copy()
+
+    combined_mask = np.zeros((h, w), dtype=np.uint8)
 
     pothole_count = 0
     pothole_real_areas = []
-    total_damage_pixels = 0
 
     for p in predictions:
 
         if "points" in p:
 
-            # Create empty mask for this pothole
+            pothole_count += 1
+
+            # Individual mask
             mask = np.zeros((h, w), dtype=np.uint8)
 
             pts = np.array(
@@ -78,23 +80,22 @@ def process_frame(image, predictions):
                 dtype=np.int32
             )
 
-            # Fill mask for this pothole
             cv2.fillPoly(mask, [pts], 255)
 
-            # Count exact segmented pixels
+            # Add to combined mask
+            combined_mask = cv2.bitwise_or(combined_mask, mask)
+
+            # Pixel area (segmentation-based)
             pixel_area = np.sum(mask == 255)
 
-            # Convert to real area
+            # Convert to real-world area
             real_area = pixel_area * area_conversion_factor
-
-            pothole_count += 1
             pothole_real_areas.append(real_area)
-            total_damage_pixels += pixel_area
 
             # Draw segmentation overlay
             cv2.fillPoly(seg_overlay, [pts], (0, 255, 0))
 
-            # Compute centroid for labeling
+            # Compute centroid for label
             M = cv2.moments(mask)
             if M["m00"] != 0:
                 cx = int(M["m10"] / M["m00"])
@@ -102,7 +103,6 @@ def process_frame(image, predictions):
             else:
                 cx, cy = pts[0]
 
-            # Label segmentation with REAL AREA
             cv2.putText(
                 seg_overlay,
                 f"{real_area:.2f} m2",
@@ -113,11 +113,14 @@ def process_frame(image, predictions):
                 2
             )
 
+    # Blend overlay
     seg_overlay = cv2.addWeighted(image, 0.6, seg_overlay, 0.4, 0)
 
-    total_damage_m2 = total_damage_pixels * area_conversion_factor
+    # Total area from combined mask (avoids double counting)
+    total_pixels = np.sum(combined_mask == 255)
+    total_damage_m2 = total_pixels * area_conversion_factor
 
-    return seg_overlay, pothole_count, pothole_real_areas, total_damage_m2
+    return seg_overlay, combined_mask, pothole_count, pothole_real_areas, total_damage_m2
 
 
 # ---------------------------------------------------
@@ -144,16 +147,21 @@ if uploaded_file:
 
     (
         seg_overlay,
+        binary_mask,
         pothole_count,
         pothole_real_areas,
         total_damage_m2
     ) = process_frame(image, predictions)
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
     col1.image(image_rgb, caption="Original Image", use_container_width=True)
     col2.image(cv2.cvtColor(seg_overlay, cv2.COLOR_BGR2RGB),
-               caption="Segmentation Area (m²)",
+               caption="Segmentation Overlay (m²)",
+               use_container_width=True)
+    col3.image(binary_mask,
+               caption="Binary Segmentation Mask (Black & White)",
+               clamp=True,
                use_container_width=True)
 
     st.divider()
