@@ -9,15 +9,36 @@ import os
 # PAGE CONFIG
 # ---------------------------------------------------
 st.set_page_config(
-    page_title="Pothole Detection & Segmentation",
+    page_title="Pothole Measurement System",
     page_icon="🕳️",
     layout="wide"
 )
 
-st.title("🕳️ Pothole Detection + Segmentation (Cloud Safe)")
-st.write("Bounding Boxes, Segmentation Overlay, Binary Mask, Area & Count")
+st.title("🕳️ Pothole Detection + Real Area Measurement")
 
 uploaded_file = st.file_uploader("Upload Road Image", type=["jpg", "jpeg", "png"])
+
+# ---------------------------------------------------
+# SCALE INPUT (REAL WORLD CONVERSION)
+# ---------------------------------------------------
+st.sidebar.header("📏 Scale Calibration")
+
+known_length_m = st.sidebar.number_input(
+    "Known Object Length (meters)",
+    min_value=0.01,
+    value=1.0,
+    step=0.1
+)
+
+pixel_length = st.sidebar.number_input(
+    "That Object Length in Pixels",
+    min_value=1,
+    value=100,
+    step=10
+)
+
+meter_per_pixel = known_length_m / pixel_length
+area_conversion_factor = meter_per_pixel ** 2
 
 # ---------------------------------------------------
 # ROBOFLOW CLIENT
@@ -32,32 +53,24 @@ WORKFLOW_ID = "detect-count-and-visualize-2"
 
 
 # ---------------------------------------------------
-# PROCESS FRAME FUNCTION (UPDATED)
+# PROCESS FUNCTION
 # ---------------------------------------------------
 def process_frame(image, predictions):
 
     h, w, _ = image.shape
-    total_image_area = h * w
+    total_image_area_px = h * w
 
     bbox_image = image.copy()
     seg_overlay = image.copy()
     binary_mask = np.zeros((h, w), dtype=np.uint8)
 
     pothole_count = 0
-    pothole_areas = []
-    total_damage_area = 0
+    pothole_pixel_areas = []
+    pothole_real_areas = []
+    total_damage_px = 0
 
     for p in predictions:
 
-        # ---------------- BOUNDING BOX ----------------
-        if all(k in p for k in ["x", "y", "width", "height"]):
-            x1 = int(p["x"] - p["width"] / 2)
-            y1 = int(p["y"] - p["height"] / 2)
-            x2 = int(p["x"] + p["width"] / 2)
-            y2 = int(p["y"] + p["height"] / 2)
-            cv2.rectangle(bbox_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
-
-        # ---------------- SEGMENTATION ----------------
         if "points" in p:
 
             pts = np.array(
@@ -65,23 +78,31 @@ def process_frame(image, predictions):
                 dtype=np.int32
             )
 
-            # Fill overlay
             cv2.fillPoly(seg_overlay, [pts], (0, 255, 0))
             cv2.fillPoly(binary_mask, [pts], 255)
 
-            # Calculate area (pixel area)
-            area = cv2.contourArea(pts)
+            pixel_area = cv2.contourArea(pts)
+            real_area = pixel_area * area_conversion_factor
 
             pothole_count += 1
-            pothole_areas.append(area)
-            total_damage_area += area
+            pothole_pixel_areas.append(pixel_area)
+            pothole_real_areas.append(real_area)
+            total_damage_px += pixel_area
 
-            # Draw area text
+            # Bounding box
+            x, y, w_box, h_box = p["x"], p["y"], p["width"], p["height"]
+            x1 = int(x - w_box / 2)
+            y1 = int(y - h_box / 2)
+            x2 = int(x + w_box / 2)
+            y2 = int(y + h_box / 2)
+            cv2.rectangle(bbox_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+
+            # Label with real area
             cx = int(np.mean(pts[:, 0]))
             cy = int(np.mean(pts[:, 1]))
             cv2.putText(
                 bbox_image,
-                f"{int(area)} px",
+                f"{real_area:.2f} m2",
                 (cx, cy),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
@@ -91,25 +112,23 @@ def process_frame(image, predictions):
 
     seg_overlay = cv2.addWeighted(image, 0.6, seg_overlay, 0.4, 0)
 
-    damage_percent = (total_damage_area / total_image_area) * 100
+    total_damage_m2 = total_damage_px * area_conversion_factor
 
     return (
         bbox_image,
         seg_overlay,
         binary_mask,
         pothole_count,
-        pothole_areas,
-        total_damage_area,
-        damage_percent
+        pothole_real_areas,
+        total_damage_m2
     )
 
 
-# ==========================================================
+# ---------------------------------------------------
 # IMAGE MODE
-# ==========================================================
+# ---------------------------------------------------
 if uploaded_file:
 
-    # Save to temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
         tmp.write(uploaded_file.read())
         temp_path = tmp.name
@@ -117,7 +136,7 @@ if uploaded_file:
     image = cv2.imread(temp_path)
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-    with st.spinner("Running detection + segmentation..."):
+    with st.spinner("Running AI detection..."):
         result = client.run_workflow(
             workspace_name=WORKSPACE,
             workflow_id=WORKFLOW_ID,
@@ -132,25 +151,19 @@ if uploaded_file:
         seg_overlay,
         binary_mask,
         pothole_count,
-        pothole_areas,
-        total_damage_area,
-        damage_percent
+        pothole_real_areas,
+        total_damage_m2
     ) = process_frame(image, predictions)
 
-    # ---------------- DISPLAY RESULTS ----------------
     col1, col2, col3 = st.columns(3)
 
-    with col1:
-        st.subheader("Original")
-        st.image(image_rgb, use_container_width=True)
-
-    with col2:
-        st.subheader("Bounding Boxes")
-        st.image(cv2.cvtColor(bbox_image, cv2.COLOR_BGR2RGB), use_container_width=True)
-
-    with col3:
-        st.subheader("Segmentation Overlay")
-        st.image(cv2.cvtColor(seg_overlay, cv2.COLOR_BGR2RGB), use_container_width=True)
+    col1.image(image_rgb, caption="Original", use_container_width=True)
+    col2.image(cv2.cvtColor(bbox_image, cv2.COLOR_BGR2RGB),
+               caption="Bounding Boxes (Area in m²)",
+               use_container_width=True)
+    col3.image(cv2.cvtColor(seg_overlay, cv2.COLOR_BGR2RGB),
+               caption="Segmentation Overlay",
+               use_container_width=True)
 
     st.divider()
 
@@ -159,18 +172,15 @@ if uploaded_file:
 
     st.divider()
 
-    # ---------------- METRICS ----------------
-    st.subheader("📊 Pothole Analysis")
+    st.subheader("📊 Real World Pothole Analysis")
 
-    colA, colB, colC = st.columns(3)
-
+    colA, colB = st.columns(2)
     colA.metric("Number of Potholes", pothole_count)
-    colB.metric("Total Damage Area (px)", int(total_damage_area))
-    colC.metric("Damage Percentage (%)", f"{damage_percent:.2f}")
+    colB.metric("Total Damaged Area (m²)", f"{total_damage_m2:.3f}")
 
     if pothole_count > 0:
-        st.write("### Individual Pothole Areas (pixels)")
-        for i, area in enumerate(pothole_areas, 1):
-            st.write(f"Pothole {i}: {int(area)} px")
+        st.write("### Individual Pothole Areas (m²)")
+        for i, area in enumerate(pothole_real_areas, 1):
+            st.write(f"Pothole {i}: {area:.3f} m²")
 
     os.remove(temp_path)
