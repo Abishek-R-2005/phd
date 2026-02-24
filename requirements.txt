@@ -1,6 +1,5 @@
-streamlit==1.33.0
-numpy==1.26.4
-Pillow==10.2.0
-requests==2.31.0
-imageio==2.34.0
-imageio-ffmpeg==0.4.9
+streamlit
+inference-sdk
+opencv-python-headless
+numpy
+supervision
