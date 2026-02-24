@@ -24,7 +24,7 @@ uploaded_file = st.file_uploader("Upload Road Image", type=["jpg", "jpeg", "png"
 # ---------------------------------------------------
 client = InferenceHTTPClient(
     api_url="https://serverless.roboflow.com",
-    api_key="YOUR_API_KEY"
+    api_key="7l5BKkxbenEWpBCBPtSw"
 )
 
 WORKSPACE = "project1-mflte"
