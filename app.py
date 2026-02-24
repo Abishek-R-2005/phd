@@ -24,7 +24,7 @@ if file_type == "Image":
 else:
     uploaded_file = st.file_uploader("Upload Road Video", type=["mp4", "mov", "avi"])
 
-API_KEY = st.secrets["ROBOFLOW_API_KEY"]
+API_KEY ="7l5BKkxbenEWpBCBPtSw'
 WORKFLOW_URL = f"https://serverless.roboflow.com/project1-mflte/detect-count-and-visualize-2?api_key={API_KEY}"
 
 # ==========================================================
