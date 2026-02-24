@@ -45,7 +45,7 @@ area_conversion_factor = meter_per_pixel ** 2
 # ---------------------------------------------------
 client = InferenceHTTPClient(
     api_url="https://serverless.roboflow.com",
-    api_key="YOUR_API_KEY"
+    api_key="7l5BKkxbenEWpBCBPtSw"
 )
 
 WORKSPACE = "project1-mflte"
