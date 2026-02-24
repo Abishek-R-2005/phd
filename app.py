@@ -9,12 +9,12 @@ import os
 # PAGE CONFIG
 # ---------------------------------------------------
 st.set_page_config(
-    page_title="Pothole Segmentation Measurement",
+    page_title="Pothole Segmentation Measurement System",
     page_icon="🕳️",
     layout="wide"
 )
 
-st.title("🕳️ Pothole Segmentation + Real Area (m²)")
+st.title("🕳️ Pothole Detection + Segmentation + Real Area (m²)")
 
 uploaded_file = st.file_uploader("Upload Road Image", type=["jpg", "jpeg", "png"])
 
@@ -45,7 +45,7 @@ area_conversion_factor = meter_per_pixel ** 2
 # ---------------------------------------------------
 client = InferenceHTTPClient(
     api_url="https://serverless.roboflow.com",
-    api_key="7l5BKkxbenEWpBCBPtSw"
+    api_key="YOUR_API_KEY"
 )
 
 WORKSPACE = "project1-mflte"
@@ -53,14 +53,14 @@ WORKFLOW_ID = "detect-count-and-visualize-2"
 
 
 # ---------------------------------------------------
-# SEGMENTATION PROCESSING
+# PROCESS FUNCTION
 # ---------------------------------------------------
 def process_frame(image, predictions):
 
     h, w, _ = image.shape
 
+    bbox_image = image.copy()
     seg_overlay = image.copy()
-
     combined_mask = np.zeros((h, w), dtype=np.uint8)
 
     pothole_count = 0
@@ -68,11 +68,20 @@ def process_frame(image, predictions):
 
     for p in predictions:
 
+        # ------------------ BOUNDING BOX DRAW ------------------
+        if all(k in p for k in ["x", "y", "width", "height"]):
+            x1 = int(p["x"] - p["width"] / 2)
+            y1 = int(p["y"] - p["height"] / 2)
+            x2 = int(p["x"] + p["width"] / 2)
+            y2 = int(p["y"] + p["height"] / 2)
+
+            cv2.rectangle(bbox_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+
+        # ------------------ SEGMENTATION AREA ------------------
         if "points" in p:
 
             pothole_count += 1
 
-            # Individual mask
             mask = np.zeros((h, w), dtype=np.uint8)
 
             pts = np.array(
@@ -85,17 +94,17 @@ def process_frame(image, predictions):
             # Add to combined mask
             combined_mask = cv2.bitwise_or(combined_mask, mask)
 
-            # Pixel area (segmentation-based)
+            # Pixel area (exact segmentation)
             pixel_area = np.sum(mask == 255)
 
-            # Convert to real-world area
+            # Convert to m²
             real_area = pixel_area * area_conversion_factor
             pothole_real_areas.append(real_area)
 
             # Draw segmentation overlay
             cv2.fillPoly(seg_overlay, [pts], (0, 255, 0))
 
-            # Compute centroid for label
+            # Centroid for labeling
             M = cv2.moments(mask)
             if M["m00"] != 0:
                 cx = int(M["m10"] / M["m00"])
@@ -113,14 +122,21 @@ def process_frame(image, predictions):
                 2
             )
 
-    # Blend overlay
+    # Blend segmentation overlay
     seg_overlay = cv2.addWeighted(image, 0.6, seg_overlay, 0.4, 0)
 
-    # Total area from combined mask (avoids double counting)
+    # Total area from combined mask (no double counting)
     total_pixels = np.sum(combined_mask == 255)
     total_damage_m2 = total_pixels * area_conversion_factor
 
-    return seg_overlay, combined_mask, pothole_count, pothole_real_areas, total_damage_m2
+    return (
+        bbox_image,
+        seg_overlay,
+        combined_mask,
+        pothole_count,
+        pothole_real_areas,
+        total_damage_m2
+    )
 
 
 # ---------------------------------------------------
@@ -135,7 +151,7 @@ if uploaded_file:
     image = cv2.imread(temp_path)
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-    with st.spinner("Running AI segmentation..."):
+    with st.spinner("Running AI detection..."):
         result = client.run_workflow(
             workspace_name=WORKSPACE,
             workflow_id=WORKFLOW_ID,
@@ -146,6 +162,7 @@ if uploaded_file:
     predictions = result[0]["predictions"]["predictions"]
 
     (
+        bbox_image,
         seg_overlay,
         binary_mask,
         pothole_count,
@@ -153,20 +170,24 @@ if uploaded_file:
         total_damage_m2
     ) = process_frame(image, predictions)
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
+    col3, col4 = st.columns(2)
 
     col1.image(image_rgb, caption="Original Image", use_container_width=True)
-    col2.image(cv2.cvtColor(seg_overlay, cv2.COLOR_BGR2RGB),
-               caption="Segmentation Overlay (m²)",
+    col2.image(cv2.cvtColor(bbox_image, cv2.COLOR_BGR2RGB),
+               caption="Bounding Box Output",
                use_container_width=True)
-    col3.image(binary_mask,
+    col3.image(cv2.cvtColor(seg_overlay, cv2.COLOR_BGR2RGB),
+               caption="Segmentation Overlay (Area in m²)",
+               use_container_width=True)
+    col4.image(binary_mask,
                caption="Binary Segmentation Mask (Black & White)",
                clamp=True,
                use_container_width=True)
 
     st.divider()
 
-    st.subheader("📊 Segmentation-Based Measurement")
+    st.subheader("📊 Pothole Measurement Results")
 
     colA, colB = st.columns(2)
     colA.metric("Number of Potholes", pothole_count)
