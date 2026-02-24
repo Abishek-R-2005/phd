@@ -1,21 +1,20 @@
 import streamlit as st
-from inference_sdk import InferenceHTTPClient
-import cv2
 import numpy as np
+import requests
+import io
 import tempfile
 import os
+import imageio
+from PIL import Image, ImageDraw
 
-# ----------------------------
-# Page Config
-# ----------------------------
 st.set_page_config(
     page_title="Pothole Detection & Segmentation",
     page_icon="🕳️",
     layout="wide"
 )
 
-st.title("🕳️ Pothole Detection + Segmentation (Image + Video)")
-st.write("Bounding Boxes, Segmentation Overlay, and Binary Mask (Cloud Ready)")
+st.title("🕳️ Pothole Detection + Segmentation (Cloud Safe)")
+st.write("Bounding Boxes, Segmentation Overlay, Binary Mask")
 
 file_type = st.radio("Select Input Type", ["Image", "Video"])
 
@@ -23,195 +22,146 @@ uploaded_file = None
 if file_type == "Image":
     uploaded_file = st.file_uploader("Upload Road Image", type=["jpg", "jpeg", "png"])
 else:
-    uploaded_file = st.file_uploader("Upload Road Video", type=["mp4", "mov", "avi", "mkv"])
+    uploaded_file = st.file_uploader("Upload Road Video", type=["mp4", "mov", "avi"])
 
-# ----------------------------
-# Secure Roboflow Client
-# ----------------------------
-client = InferenceHTTPClient(
-    api_url="https://serverless.roboflow.com",
-    api_key=st.secrets["ROBOFLOW_API_KEY"]
-)
+API_KEY = st.secrets["ROBOFLOW_API_KEY"]
+WORKFLOW_URL = f"https://serverless.roboflow.com/project1-mflte/detect-count-and-visualize-2?api_key={API_KEY}"
 
 # ==========================================================
-# Frame Processing Function
+# Roboflow REST Call
 # ==========================================================
-def process_frame(image, predictions):
-    h, w, _ = image.shape
+def run_inference(image_bytes):
+    response = requests.post(
+        WORKFLOW_URL,
+        files={"file": image_bytes}
+    )
+    return response.json()
 
-    # Bounding Boxes
+# ==========================================================
+# DRAW FUNCTION (Pillow)
+# ==========================================================
+def process_pil_image(image, predictions):
+
+    w, h = image.size
+
     bbox_image = image.copy()
+    overlay_image = image.copy()
+    mask_image = Image.new("L", (w, h), 0)
+
+    draw_bbox = ImageDraw.Draw(bbox_image)
+    draw_overlay = ImageDraw.Draw(overlay_image, "RGBA")
+    draw_mask = ImageDraw.Draw(mask_image)
+
     for p in predictions:
+
         if all(k in p for k in ["x", "y", "width", "height"]):
-            x1 = int(p["x"] - p["width"] / 2)
-            y1 = int(p["y"] - p["height"] / 2)
-            x2 = int(p["x"] + p["width"] / 2)
-            y2 = int(p["y"] + p["height"] / 2)
-            cv2.rectangle(bbox_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            x1 = p["x"] - p["width"] / 2
+            y1 = p["y"] - p["height"] / 2
+            x2 = p["x"] + p["width"] / 2
+            y2 = p["y"] + p["height"] / 2
+            draw_bbox.rectangle([x1, y1, x2, y2], outline="red", width=3)
 
-    # Segmentation Overlay
-    seg_overlay = image.copy()
-    for obj in predictions:
-        if "points" in obj:
-            pts = np.array([[int(p["x"]), int(p["y"])] for p in obj["points"]], dtype=np.int32)
-            cv2.fillPoly(seg_overlay, [pts], (0, 255, 0))
-    seg_overlay = cv2.addWeighted(image, 0.6, seg_overlay, 0.4, 0)
+        if "points" in p:
+            pts = [(pt["x"], pt["y"]) for pt in p["points"]]
+            draw_overlay.polygon(pts, fill=(0, 255, 0, 120))
+            draw_mask.polygon(pts, fill=255)
 
-    # Binary Mask
-    binary_mask = np.zeros((h, w), dtype=np.uint8)
-    for obj in predictions:
-        if "points" in obj:
-            pts = np.array([[int(p["x"]), int(p["y"])] for p in obj["points"]], dtype=np.int32)
-            cv2.fillPoly(binary_mask, [pts], 255)
-
-    binary_mask_bgr = cv2.cvtColor(binary_mask, cv2.COLOR_GRAY2BGR)
-
-    return bbox_image, seg_overlay, binary_mask_bgr
-
+    return bbox_image, overlay_image, mask_image
 
 # ==========================================================
 # IMAGE MODE
 # ==========================================================
 if uploaded_file and file_type == "Image":
 
-    image_bytes = uploaded_file.read()
-    image_np = np.frombuffer(image_bytes, np.uint8)
-    image = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image = Image.open(uploaded_file).convert("RGB")
 
-    with st.spinner("Running detection + segmentation..."):
-        result = client.run_workflow(
-            workspace_name="project1-mflte",
-            workflow_id="detect-count-and-visualize-2",
-            images={"image": image_bytes},  # send bytes
-            use_cache=True
-        )
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG")
+    img_bytes = buffer.getvalue()
 
-    predictions = result[0]["predictions"]["predictions"]
+    with st.spinner("Running detection..."):
+        result = run_inference(img_bytes)
 
-    bbox_image, seg_overlay, binary_mask_bgr = process_frame(image, predictions)
+    predictions = result.get("predictions", [])
 
-    bbox_image_rgb = cv2.cvtColor(bbox_image, cv2.COLOR_BGR2RGB)
-    seg_overlay_rgb = cv2.cvtColor(seg_overlay, cv2.COLOR_BGR2RGB)
-    binary_mask_gray = cv2.cvtColor(binary_mask_bgr, cv2.COLOR_BGR2GRAY)
+    bbox, overlay, mask = process_pil_image(image, predictions)
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.subheader("Original Image")
-        st.image(image_rgb, use_container_width=True)
+        st.subheader("Original")
+        st.image(image, use_container_width=True)
 
     with col2:
         st.subheader("Bounding Boxes")
-        st.image(bbox_image_rgb, use_container_width=True)
+        st.image(bbox, use_container_width=True)
 
     with col3:
         st.subheader("Segmentation Overlay")
-        st.image(seg_overlay_rgb, use_container_width=True)
+        st.image(overlay, use_container_width=True)
 
-    st.divider()
-    st.subheader("Binary Segmentation Mask")
-    st.image(binary_mask_gray, clamp=True)
-    st.caption("White = pothole | Black = background")
+    st.subheader("Binary Mask")
+    st.image(mask)
 
+    mask_buffer = io.BytesIO()
+    mask.save(mask_buffer, format="PNG")
+
+    st.download_button(
+        "⬇️ Download Mask",
+        data=mask_buffer.getvalue(),
+        file_name="binary_mask.png",
+        mime="image/png"
+    )
 
 # ==========================================================
 # VIDEO MODE
 # ==========================================================
 if uploaded_file and file_type == "Video":
 
-    tfile = tempfile.NamedTemporaryFile(delete=False)
-    tfile.write(uploaded_file.read())
-    tfile.close()
+    temp_input = tempfile.NamedTemporaryFile(delete=False)
+    temp_input.write(uploaded_file.read())
+    temp_input.close()
 
-    cap = cv2.VideoCapture(tfile.name)
+    reader = imageio.get_reader(temp_input.name)
+    fps = reader.get_meta_data()["fps"]
 
-    input_fps = cap.get(cv2.CAP_PROP_FPS)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    st.info(f"Processing at 1 FPS (Input FPS: {fps})")
 
-    if input_fps == 0:
-        st.error("Cannot read video FPS.")
-        st.stop()
-
-    st.info(f"🎥 Input Video FPS: {input_fps:.2f} | Resolution: {width}x{height}")
-    st.warning("Processing 1 frame per second (Cloud Safe Mode)")
-
-    skip_frames = int(input_fps)
-
-    # Temp output files
-    out_original = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
-    out_bbox = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
-    out_overlay = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
-    out_mask = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
-
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-
-    writer_original = cv2.VideoWriter(out_original, fourcc, 1, (width, height))
-    writer_bbox = cv2.VideoWriter(out_bbox, fourcc, 1, (width, height))
-    writer_overlay = cv2.VideoWriter(out_overlay, fourcc, 1, (width, height))
-    writer_mask = cv2.VideoWriter(out_mask, fourcc, 1, (width, height))
+    temp_output = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+    writer = imageio.get_writer(temp_output, fps=1)
 
     frame_count = 0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    progress = st.progress(0)
 
-    with st.spinner("Processing video frames..."):
+    with st.spinner("Processing video..."):
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        for frame in reader:
 
-            if frame_count % skip_frames == 0:
+            if frame_count % int(fps) == 0:
 
-                # Convert frame to bytes
-                _, buffer = cv2.imencode(".jpg", frame)
-                frame_bytes = buffer.tobytes()
+                pil_frame = Image.fromarray(frame).convert("RGB")
 
-                result = client.run_workflow(
-                    workspace_name="project1-mflte",
-                    workflow_id="detect-count-and-visualize-2",
-                    images={"image": frame_bytes},
-                    use_cache=True
-                )
+                buffer = io.BytesIO()
+                pil_frame.save(buffer, format="JPEG")
+                frame_bytes = buffer.getvalue()
 
-                predictions = result[0]["predictions"]["predictions"]
+                result = run_inference(frame_bytes)
+                predictions = result.get("predictions", [])
 
-                bbox_image, seg_overlay, binary_mask_bgr = process_frame(frame, predictions)
+                _, overlay, _ = process_pil_image(pil_frame, predictions)
 
-                writer_original.write(frame)
-                writer_bbox.write(bbox_image)
-                writer_overlay.write(seg_overlay)
-                writer_mask.write(binary_mask_bgr)
+                writer.append_data(np.array(overlay))
 
             frame_count += 1
-            progress.progress(min(frame_count / total_frames, 1.0))
 
-    cap.release()
-    writer_original.release()
-    writer_bbox.release()
-    writer_overlay.release()
-    writer_mask.release()
-    os.remove(tfile.name)
+    reader.close()
+    writer.close()
+    os.remove(temp_input.name)
 
-    st.success("✅ Video Processing Completed!")
+    st.success("✅ Video Processing Completed")
+    st.video(temp_output)
 
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("Original")
-        st.video(out_original)
-        st.subheader("Bounding Boxes")
-        st.video(out_bbox)
-
-    with col2:
-        st.subheader("Segmentation Overlay")
-        st.video(out_overlay)
-        st.subheader("Binary Mask")
-        st.video(out_mask)
-
-    st.download_button("⬇️ Download Original", open(out_original, "rb"), file_name="original.mp4")
-    st.download_button("⬇️ Download Bounding Box", open(out_bbox, "rb"), file_name="bbox.mp4")
-    st.download_button("⬇️ Download Overlay", open(out_overlay, "rb"), file_name="overlay.mp4")
-    st.download_button("⬇️ Download Mask", open(out_mask, "rb"), file_name="mask.mp4")
+    st.download_button(
+        "⬇️ Download Processed Video",
+        open(temp_output, "rb"),
+        file_name="processed_video.mp4"
+    )
