@@ -3,3 +3,4 @@ inference-sdk
 opencv-python-headless
 numpy
 supervision
+imageio
