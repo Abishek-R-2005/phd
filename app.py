@@ -1,13 +1,10 @@
 import streamlit as st
-from inference_sdk import InferenceHTTPClient
-import cv2
 import numpy as np
+import requests
 import json
 import io
+from PIL import Image, ImageDraw
 
-# ----------------------------
-# Page Config
-# ----------------------------
 st.set_page_config(
     page_title="Pothole Detection & Segmentation",
     page_icon="🕳️",
@@ -15,132 +12,110 @@ st.set_page_config(
 )
 
 st.title("🕳️ AI Pothole Detection + Segmentation")
-st.write("Bounding Boxes, Segmentation Overlay, and Binary Mask (Civil Ready)")
+st.write("Bounding Boxes, Segmentation Overlay, and Binary Mask (Cloud Safe Version)")
 
-# ----------------------------
-# Secure Roboflow Client
-# ----------------------------
-# IMPORTANT: Add your API key in Streamlit Cloud Secrets
-# Settings → Secrets → Add:
-# ROBOFLOW_API_KEY = "your_api_key_here"
-
-client = InferenceHTTPClient(
-    api_url="https://serverless.roboflow.com",
-    api_key=st.secrets["ROBOFLOW_API_KEY"]
-)
-
-# ----------------------------
-# Upload Image
-# ----------------------------
-uploaded_file = st.file_uploader(
-    "Upload Road Image",
-    type=["jpg", "jpeg", "png"]
-)
+uploaded_file = st.file_uploader("Upload Road Image", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
 
-    try:
-        # Read image
-        image_bytes = uploaded_file.read()
-        image_np = np.frombuffer(image_bytes, np.uint8)
-        image = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        h, w, _ = image.shape
+    image = Image.open(uploaded_file).convert("RGB")
+    w, h = image.size
 
-        # Run Roboflow workflow
-        with st.spinner("🔍 Running detection + segmentation..."):
-            result = client.run_workflow(
-                workspace_name="project1-mflte",
-                workflow_id="detect-count-and-visualize-2",
-                images={"image": image_bytes},  # ✅ send actual bytes
-                use_cache=True
-            )
+    st.image(image, caption="Original Image", use_container_width=True)
 
-        predictions = result[0]["predictions"]["predictions"]
+    # Convert image to bytes
+    buffered = io.BytesIO()
+    image.save(buffered, format="JPEG")
+    img_bytes = buffered.getvalue()
 
-        # =====================================================
-        # 1️⃣ Bounding Boxes
-        # =====================================================
-        bbox_image = image.copy()
+    # Roboflow REST API
+    api_key = st.secrets["ROBOFLOW_API_KEY"]
 
-        for p in predictions:
-            if all(k in p for k in ["x", "y", "width", "height"]):
-                x1 = int(p["x"] - p["width"] / 2)
-                y1 = int(p["y"] - p["height"] / 2)
-                x2 = int(p["x"] + p["width"] / 2)
-                y2 = int(p["y"] + p["height"] / 2)
+    url = f"https://serverless.roboflow.com/project1-mflte/detect-count-and-visualize-2?api_key={api_key}"
 
-                cv2.rectangle(bbox_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
-
-        bbox_image_rgb = cv2.cvtColor(bbox_image, cv2.COLOR_BGR2RGB)
-
-        # =====================================================
-        # 2️⃣ Segmentation Overlay
-        # =====================================================
-        seg_overlay = image.copy()
-
-        for obj in predictions:
-            if "points" in obj:
-                pts = np.array(
-                    [[int(p["x"]), int(p["y"])] for p in obj["points"]],
-                    dtype=np.int32
-                )
-                cv2.fillPoly(seg_overlay, [pts], (0, 255, 0))
-
-        seg_overlay = cv2.addWeighted(image, 0.6, seg_overlay, 0.4, 0)
-        seg_overlay_rgb = cv2.cvtColor(seg_overlay, cv2.COLOR_BGR2RGB)
-
-        # =====================================================
-        # 3️⃣ Binary Mask
-        # =====================================================
-        binary_mask = np.zeros((h, w), dtype=np.uint8)
-
-        for obj in predictions:
-            if "points" in obj:
-                pts = np.array(
-                    [[int(p["x"]), int(p["y"])] for p in obj["points"]],
-                    dtype=np.int32
-                )
-                cv2.fillPoly(binary_mask, [pts], 255)
-
-        # =====================================================
-        # Display Results
-        # =====================================================
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            st.subheader("Original Image")
-            st.image(image_rgb, use_container_width=True)
-
-        with col2:
-            st.subheader("Bounding Boxes")
-            st.image(bbox_image_rgb, use_container_width=True)
-
-        with col3:
-            st.subheader("Segmentation Overlay")
-            st.image(seg_overlay_rgb, use_container_width=True)
-
-        st.divider()
-
-        st.subheader("Binary Segmentation Mask (Civil Software Ready)")
-        st.image(binary_mask, clamp=True)
-        st.caption("White = pothole | Black = background")
-
-        # =====================================================
-        # Download Mask (In-Memory)
-        # =====================================================
-        mask_bytes = cv2.imencode(".png", binary_mask)[1].tobytes()
-
-        st.download_button(
-            label="⬇️ Download Binary Mask",
-            data=mask_bytes,
-            file_name="pothole_binary_mask.png",
-            mime="image/png"
+    with st.spinner("🔍 Running detection + segmentation..."):
+        response = requests.post(
+            url,
+            files={"file": img_bytes}
         )
 
-        # Debug JSON
-        with st.expander("Show raw predictions JSON"):
-            st.code(json.dumps(result[0]["predictions"], indent=4), language="json")
+    if response.status_code != 200:
+        st.error("Roboflow API Error")
+        st.stop()
 
-    except Exception as e:
-        st.error(f"Error occurred: {e}")
+    result = response.json()
+    predictions = result.get("predictions", [])
+
+    # ==========================
+    # Bounding Box Image
+    # ==========================
+    bbox_image = image.copy()
+    draw_bbox = ImageDraw.Draw(bbox_image)
+
+    for p in predictions:
+        if all(k in p for k in ["x", "y", "width", "height"]):
+            x1 = p["x"] - p["width"] / 2
+            y1 = p["y"] - p["height"] / 2
+            x2 = p["x"] + p["width"] / 2
+            y2 = p["y"] + p["height"] / 2
+
+            draw_bbox.rectangle([x1, y1, x2, y2], outline="red", width=3)
+
+    # ==========================
+    # Segmentation Overlay
+    # ==========================
+    seg_overlay = image.copy()
+    draw_seg = ImageDraw.Draw(seg_overlay, "RGBA")
+
+    for obj in predictions:
+        if "points" in obj:
+            pts = [(p["x"], p["y"]) for p in obj["points"]]
+            draw_seg.polygon(pts, fill=(0, 255, 0, 120))
+
+    # ==========================
+    # Binary Mask
+    # ==========================
+    binary_mask = Image.new("L", (w, h), 0)
+    draw_mask = ImageDraw.Draw(binary_mask)
+
+    for obj in predictions:
+        if "points" in obj:
+            pts = [(p["x"], p["y"]) for p in obj["points"]]
+            draw_mask.polygon(pts, fill=255)
+
+    # ==========================
+    # Display Results
+    # ==========================
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.subheader("Original")
+        st.image(image, use_container_width=True)
+
+    with col2:
+        st.subheader("Bounding Boxes")
+        st.image(bbox_image, use_container_width=True)
+
+    with col3:
+        st.subheader("Segmentation Overlay")
+        st.image(seg_overlay, use_container_width=True)
+
+    st.divider()
+
+    st.subheader("Binary Segmentation Mask")
+    st.image(binary_mask)
+    st.caption("White = pothole | Black = background")
+
+    # Download mask
+    mask_buffer = io.BytesIO()
+    binary_mask.save(mask_buffer, format="PNG")
+
+    st.download_button(
+        "⬇️ Download Binary Mask",
+        data=mask_buffer.getvalue(),
+        file_name="pothole_binary_mask.png",
+        mime="image/png"
+    )
+
+    with st.expander("Show Raw JSON"):
+        st.code(json.dumps(result, indent=4), language="json")
