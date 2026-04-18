@@ -1,47 +1,30 @@
 import streamlit as st
 from inference_sdk import InferenceHTTPClient
+import google.generativeai as genai
 import cv2
 import numpy as np
 import tempfile
 import os
 
 # ---------------------------------------------------
-# PAGE CONFIG
+# CONFIG
 # ---------------------------------------------------
 st.set_page_config(
-    page_title="Pothole Segmentation Measurement System",
+    page_title="Pothole Area + Depth + Volume",
     page_icon="🕳️",
     layout="wide"
 )
 
-st.title("🕳️ Pothole Detection + Segmentation + Real Area (m²)")
-
-uploaded_file = st.file_uploader("Upload Road Image", type=["jpg", "jpeg", "png"])
+st.title("🕳️ Pothole Detection + Depth + Volume Estimation")
 
 # ---------------------------------------------------
-# SCALE CALIBRATION
+# GEMINI API
 # ---------------------------------------------------
-st.sidebar.header("📏 Scale Calibration")
-
-known_length_m = st.sidebar.number_input(
-    "Known Object Length (meters)",
-    min_value=0.01,
-    value=1.0,
-    step=0.1
-)
-
-pixel_length = st.sidebar.number_input(
-    "That Object Length in Pixels",
-    min_value=1,
-    value=100,
-    step=10
-)
-
-meter_per_pixel = known_length_m / pixel_length
-area_conversion_factor = meter_per_pixel ** 2
+GEMINI_API_KEY = "AIzaSyD0XnfJLaO4ar41jQC-gXNNm_0Qihl7Nvs"
+genai.configure(api_key=GEMINI_API_KEY)
 
 # ---------------------------------------------------
-# ROBOFLOW CLIENT
+# ROBOFLOW
 # ---------------------------------------------------
 client = InferenceHTTPClient(
     api_url="https://serverless.roboflow.com",
@@ -51,12 +34,62 @@ client = InferenceHTTPClient(
 WORKSPACE = "project1-mflte"
 WORKFLOW_ID = "detect-count-and-visualize-2"
 
+# ---------------------------------------------------
+# FILE
+# ---------------------------------------------------
+uploaded_file = st.file_uploader("Upload Road Image", type=["jpg", "jpeg", "png"])
 
 # ---------------------------------------------------
-# PROCESS FUNCTION
+# SCALE
 # ---------------------------------------------------
-def process_frame(image, predictions):
+st.sidebar.header("📏 Scale Calibration")
 
+known_length_m = st.sidebar.number_input(
+    "Known Object Length (meters)",
+    min_value=0.01,
+    value=1.0
+)
+
+pixel_length = st.sidebar.number_input(
+    "Object Length in Pixels",
+    min_value=1,
+    value=100
+)
+
+meter_per_pixel = known_length_m / pixel_length
+area_conversion_factor = meter_per_pixel ** 2
+
+
+# ---------------------------------------------------
+# GEMINI DEPTH ESTIMATION
+# ---------------------------------------------------
+def estimate_depth_with_gemini(image_path):
+    model = genai.GenerativeModel("gemini-2.5-flash")
+
+    prompt = """
+    Analyze this road pothole image.
+    Estimate the pothole depth in meters.
+
+    Return ONLY a single numeric value.
+    Example:
+    0.08
+    """
+
+    image_data = genai.upload_file(image_path)
+
+    response = model.generate_content([prompt, image_data])
+
+    try:
+        depth = float(response.text.strip())
+        return depth
+    except:
+        return 0.05  # fallback default 5 cm
+
+
+# ---------------------------------------------------
+# PROCESS
+# ---------------------------------------------------
+def process_frame(image, predictions, area_conversion_factor):
     h, w, _ = image.shape
 
     bbox_image = image.copy()
@@ -64,11 +97,9 @@ def process_frame(image, predictions):
     combined_mask = np.zeros((h, w), dtype=np.uint8)
 
     pothole_count = 0
-    pothole_real_areas = []
+    pothole_areas = []
 
     for p in predictions:
-
-        # ------------------ BOUNDING BOX DRAW ------------------
         if all(k in p for k in ["x", "y", "width", "height"]):
             x1 = int(p["x"] - p["width"] / 2)
             y1 = int(p["y"] - p["height"] / 2)
@@ -77,9 +108,7 @@ def process_frame(image, predictions):
 
             cv2.rectangle(bbox_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
-        # ------------------ SEGMENTATION AREA ------------------
         if "points" in p:
-
             pothole_count += 1
 
             mask = np.zeros((h, w), dtype=np.uint8)
@@ -91,59 +120,26 @@ def process_frame(image, predictions):
 
             cv2.fillPoly(mask, [pts], 255)
 
-            # Add to combined mask
             combined_mask = cv2.bitwise_or(combined_mask, mask)
 
-            # Pixel area (exact segmentation)
             pixel_area = np.sum(mask == 255)
-
-            # Convert to m²
             real_area = pixel_area * area_conversion_factor
-            pothole_real_areas.append(real_area)
+            pothole_areas.append(real_area)
 
-            # Draw segmentation overlay
             cv2.fillPoly(seg_overlay, [pts], (0, 255, 0))
 
-            # Centroid for labeling
-            M = cv2.moments(mask)
-            if M["m00"] != 0:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-            else:
-                cx, cy = pts[0]
-
-            cv2.putText(
-                seg_overlay,
-                f"{real_area:.2f} m2",
-                (cx, cy),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 0, 255),
-                2
-            )
-
-    # Blend segmentation overlay
     seg_overlay = cv2.addWeighted(image, 0.6, seg_overlay, 0.4, 0)
 
-    # Total area from combined mask (no double counting)
     total_pixels = np.sum(combined_mask == 255)
-    total_damage_m2 = total_pixels * area_conversion_factor
+    total_area = total_pixels * area_conversion_factor
 
-    return (
-        bbox_image,
-        seg_overlay,
-        combined_mask,
-        pothole_count,
-        pothole_real_areas,
-        total_damage_m2
-    )
+    return bbox_image, seg_overlay, combined_mask, pothole_count, pothole_areas, total_area
 
 
 # ---------------------------------------------------
-# IMAGE MODE
+# MAIN
 # ---------------------------------------------------
 if uploaded_file:
-
     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
         tmp.write(uploaded_file.read())
         temp_path = tmp.name
@@ -151,7 +147,7 @@ if uploaded_file:
     image = cv2.imread(temp_path)
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-    with st.spinner("Running AI detection..."):
+    with st.spinner("Detecting pothole area..."):
         result = client.run_workflow(
             workspace_name=WORKSPACE,
             workflow_id=WORKFLOW_ID,
@@ -161,41 +157,47 @@ if uploaded_file:
 
     predictions = result[0]["predictions"]["predictions"]
 
-    (
-        bbox_image,
-        seg_overlay,
-        binary_mask,
-        pothole_count,
-        pothole_real_areas,
-        total_damage_m2
-    ) = process_frame(image, predictions)
+    bbox_image, seg_overlay, binary_mask, pothole_count, pothole_areas, total_area = process_frame(
+        image,
+        predictions,
+        area_conversion_factor
+    )
 
-    col1, col2 = st.columns(2)
-    col3, col4 = st.columns(2)
+    with st.spinner("Estimating pothole depth using Gemini AI..."):
+        estimated_depth = estimate_depth_with_gemini(temp_path)
 
-    col1.image(image_rgb, caption="Original Image", use_container_width=True)
-    col2.image(cv2.cvtColor(bbox_image, cv2.COLOR_BGR2RGB),
-               caption="Bounding Box Output",
-               use_container_width=True)
-    col3.image(cv2.cvtColor(seg_overlay, cv2.COLOR_BGR2RGB),
-               caption="Segmentation Overlay (Area in m²)",
-               use_container_width=True)
-    col4.image(binary_mask,
-               caption="Binary Segmentation Mask (Black & White)",
-               clamp=True,
-               use_container_width=True)
+    volume = total_area * estimated_depth
+
+    # ---------------------------------------------------
+    # DISPLAY
+    # ---------------------------------------------------
+    c1, c2 = st.columns(2)
+    c3, c4 = st.columns(2)
+
+    c1.image(image_rgb, caption="Original", use_container_width=True)
+    c2.image(cv2.cvtColor(bbox_image, cv2.COLOR_BGR2RGB), caption="Bounding Box", use_container_width=True)
+    c3.image(cv2.cvtColor(seg_overlay, cv2.COLOR_BGR2RGB), caption="Segmentation", use_container_width=True)
+    c4.image(binary_mask, caption="Binary Mask", use_container_width=True)
 
     st.divider()
 
-    st.subheader("📊 Pothole Measurement Results")
+    st.subheader("📊 Final Measurement")
 
-    colA, colB = st.columns(2)
-    colA.metric("Number of Potholes", pothole_count)
-    colB.metric("Total Damaged Area (m²)", f"{total_damage_m2:.3f}")
+    m1, m2, m3 = st.columns(3)
 
-    if pothole_count > 0:
-        st.write("### Individual Pothole Areas (m²)")
-        for i, area in enumerate(pothole_real_areas, 1):
-            st.write(f"Pothole {i}: {area:.3f} m²")
+    m1.metric("Potholes", pothole_count)
+    m2.metric("Total Area", f"{total_area:.4f} m²")
+    m3.metric("Estimated Depth", f"{estimated_depth:.4f} m")
+
+    st.success(f"Estimated Volume = {volume:.5f} m³")
+
+    st.write("### Individual Areas")
+    for i, area in enumerate(pothole_areas, 1):
+        individual_volume = area * estimated_depth
+        st.write(
+            f"Pothole {i}: Area = {area:.4f} m² | "
+            f"Depth = {estimated_depth:.4f} m | "
+            f"Volume = {individual_volume:.5f} m³"
+        )
 
     os.remove(temp_path)
