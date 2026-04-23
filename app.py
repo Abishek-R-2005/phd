@@ -20,7 +20,7 @@ st.title("🕳️ Pothole Detection + Depth + Volume Estimation")
 # ---------------------------------------------------
 # GEMINI API
 # ---------------------------------------------------
-GEMINI_API_KEY = "AIzaSyAoa1XUrCSuvEQ9NwWh3Eht_X5VHVQA0bA"
+GEMINI_API_KEY = os.getenv("API_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
 
 # ---------------------------------------------------
@@ -168,9 +168,6 @@ if uploaded_file:
 
     volume = total_area * estimated_depth
 
-    # ---------------------------------------------------
-    # DISPLAY
-    # ---------------------------------------------------
     c1, c2 = st.columns(2)
     c3, c4 = st.columns(2)
 
