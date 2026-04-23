@@ -20,7 +20,7 @@ st.title("🕳️ Pothole Detection + Depth + Volume Estimation")
 # ---------------------------------------------------
 # GEMINI API
 # ---------------------------------------------------
-GEMINI_API_KEY = "AIzaSyCWhZJOFnPgmkBmSQkqekodo08upi0TfR4"
+GEMINI_API_KEY = "AIzaSyAoa1XUrCSuvEQ9NwWh3Eht_X5VHVQA0bA"
 genai.configure(api_key=GEMINI_API_KEY)
 
 # ---------------------------------------------------
