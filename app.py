@@ -64,7 +64,7 @@ area_conversion_factor = meter_per_pixel ** 2
 # GEMINI DEPTH ESTIMATION
 # ---------------------------------------------------
 def estimate_depth_with_gemini(image_path):
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
 
     prompt = """
     Analyze this road pothole image.
